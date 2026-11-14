@@ -1,5 +1,19 @@
+import { FREQUENT_WORDS } from './frequency'
+
 const LETTERS = "abcdefghijklmnopqrstuvwxyz'"
-const MAX_SUGGESTIONS = 3
+// Default and hard limit for how many suggestions are offered. The band gives
+// each button a one-digit hotkey, so nine is the most that can be keyed.
+export const DEFAULT_SUGGESTIONS = 3
+export const MAX_SUGGESTIONS = 9
+
+// LOCAL FORK: word -> position in the most-common-first list (0 = most common).
+let frequencyRank: Map<string, number> | null = null
+function frequencyOf(word: string): number {
+  if (!frequencyRank) {
+    frequencyRank = new Map(FREQUENT_WORDS.map((w, i) => [w, i] as const))
+  }
+  return frequencyRank.get(word) ?? Number.POSITIVE_INFINITY
+}
 const MAX_EDITS2_HITS = 10
 const MAX_EDITS2_LENGTH = 8
 export const SUGGEST_CACHE_CAP = 500
@@ -19,10 +33,28 @@ function edits1(word: string): string[] {
   return out
 }
 
+// LOCAL FORK: swapped adjacent letters ("teh" -> "the") are the commonest typo,
+// so they outrank other edits at the same distance.
+function swaps(word: string): Set<string> {
+  const out = new Set<string>()
+  for (let i = 0; i < word.length - 1; i++) {
+    out.add(word.slice(0, i) + word[i + 1] + word[i] + word.slice(i + 2))
+  }
+  return out
+}
+
 function rank(word: string, candidates: Map<string, number>): string[] {
+  const swapped = swaps(word)
   return [...candidates.entries()]
     .sort(([a, da], [b, db]) => {
       if (da !== db) return da - db
+      const sa = swapped.has(a) ? 0 : 1
+      const sb = swapped.has(b) ? 0 : 1
+      if (sa !== sb) return sa - sb
+      // Common words beat rare ones; words missing from the list tie here.
+      const fa0 = frequencyOf(a)
+      const fb0 = frequencyOf(b)
+      if (fa0 !== fb0) return fa0 < fb0 ? -1 : 1
       const fa = a[0] === word[0] ? 0 : 1
       const fb = b[0] === word[0] ? 0 : 1
       if (fa !== fb) return fa - fb
@@ -36,17 +68,20 @@ function rank(word: string, candidates: Map<string, number>): string[] {
 }
 
 /**
- * Up to 3 corrections for a flagged word: dictionary words at edit distance 1,
- * falling back to distance 2 for short words. Cached per lowercased word.
+ * Up to `max` corrections (default 3, at most 9) for a flagged word:
+ * dictionary words at edit distance 1, falling back to distance 2 for short
+ * words. The cache holds the full ranked list, so `max` can change freely.
  */
 export function suggestionsFor(
   word: string,
   dict: Set<string>,
   cache: Map<string, string[]>,
+  max: number = DEFAULT_SUGGESTIONS,
 ): string[] {
+  const limit = Math.min(MAX_SUGGESTIONS, Math.max(1, Math.floor(max) || DEFAULT_SUGGESTIONS))
   const lower = word.toLowerCase()
   const cached = cache.get(lower)
-  if (cached) return recase(cached, word)
+  if (cached) return recase(cached.slice(0, limit), word)
 
   const candidates = new Map<string, number>()
   const e1 = edits1(lower)
@@ -67,7 +102,7 @@ export function suggestionsFor(
   const ranked = rank(lower, candidates)
   if (cache.size >= SUGGEST_CACHE_CAP) cache.clear()
   cache.set(lower, ranked)
-  return recase(ranked, word)
+  return recase(ranked.slice(0, limit), word)
 }
 
 function recase(suggestions: string[], word: string): string[] {
